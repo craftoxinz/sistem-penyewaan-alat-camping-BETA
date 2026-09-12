@@ -21,6 +21,7 @@ import {
 import { ChartContainer, type ChartConfig } from "@/components/ui/chart";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ExpenseFormDialog, type ExpenseItem } from "@/components/reports/expense-form-dialog";
+import { IncomeFormDialog, type IncomeItem } from "@/components/reports/income-form-dialog";
 import { toast } from "sonner";
 
 const breadcrumbs: BreadcrumbItem[] = [
@@ -32,10 +33,12 @@ interface DailyRow {
     date: string;
     dp_count: number;
     cod_count: number;
+    other_income_count?: number;
     dp_inflow: number;
     cod_inflow: number;
     fine_inflow: number;
     forfeited_inflow: number;
+    other_income_inflow?: number;
     total_inflow: number;
     cash_in: number;
     refund_outflow: number;
@@ -53,6 +56,7 @@ interface MonthlyRow {
     cod_inflow: number;
     fine_inflow: number;
     forfeited_inflow: number;
+    other_income_inflow?: number;
     total_inflow: number;
     cash_in: number;
     refund_outflow: number;
@@ -83,6 +87,15 @@ interface ExpenseCategories {
     perlengkapan_alat: number;
     operasional_toko: number;
     gaji_karyawan: number;
+    lain_lain: number;
+}
+
+interface IncomeCategories {
+    penjualan_barang: number;
+    jasa_layanan: number;
+    modal_tambahan: number;
+    pendapatan_bunga: number;
+    klaim_kompensasi: number;
     lain_lain: number;
 }
 
@@ -121,6 +134,17 @@ interface SummaryTotals {
     totalFineReceived?: number;
     cashLogsCount: number;
     expensesCount: number;
+    incomesCount: number;
+
+    // Incomes breakdown
+    totalIncomes: number;
+    totalReceivedIncomes: number;
+    totalPendingIncomes: number;
+    otherOperatingRevenue: number;
+    nonOperatingRevenue: number;
+    capitalInflow: number;
+    incomeCategories: IncomeCategories;
+    rentalGrossRevenue?: number;
 }
 
 interface Props {
@@ -129,6 +153,7 @@ interface Props {
     summaryTotals: SummaryTotals;
     cashLogs: CashLogItem[];
     expensesList: ExpenseItem[];
+    incomesList: IncomeItem[];
     filters: { start_date: string; end_date: string };
 }
 
@@ -159,6 +184,24 @@ const EXPENSE_LABELS: Record<string, string> = {
     operasional_toko: "Operasional & Utilitas",
     gaji_karyawan: "Upah / Gaji Karyawan",
     lain_lain: "Biaya Lain-lain",
+};
+
+const INCOME_COLORS: Record<string, string> = {
+    penjualan_barang: "#10b981",
+    jasa_layanan: "#06b6d4",
+    modal_tambahan: "#8b5cf6",
+    pendapatan_bunga: "#3b82f6",
+    klaim_kompensasi: "#f59e0b",
+    lain_lain: "#64748b",
+};
+
+const INCOME_LABELS: Record<string, string> = {
+    penjualan_barang: "Penjualan Retail",
+    jasa_layanan: "Jasa Layanan",
+    modal_tambahan: "Modal Tambahan",
+    pendapatan_bunga: "Pendapatan Bunga",
+    klaim_kompensasi: "Klaim Kompensasi",
+    lain_lain: "Pendapatan Lain-lain",
 };
 
 const fmt = (v: number) =>
@@ -193,14 +236,18 @@ export default function RevenueReport({
     summaryTotals,
     cashLogs,
     expensesList,
+    incomesList,
     filters,
 }: Props) {
     const [chartView, setChartView] = useState<"daily" | "monthly">("monthly");
     const [showAllDaily, setShowAllDaily] = useState(false);
     const [logFilter, setLogFilter] = useState<"all" | "cash_in" | "cash_out">("all");
     const [expenseCategoryFilter, setExpenseCategoryFilter] = useState<string>("all");
+    const [incomeCategoryFilter, setIncomeCategoryFilter] = useState<string>("all");
     const [dialogOpen, setDialogOpen] = useState(false);
     const [editingExpense, setEditingExpense] = useState<ExpenseItem | null>(null);
+    const [incomeDialogOpen, setIncomeDialogOpen] = useState(false);
+    const [editingIncome, setEditingIncome] = useState<IncomeItem | null>(null);
     const [showAccountingGuide, setShowAccountingGuide] = useState(false);
 
     const chronoDaily = [...dailyRevenue].reverse().map((d) => ({
@@ -224,6 +271,12 @@ export default function RevenueReport({
     const filteredExpenses = expensesList.filter((e) => {
         if (expenseCategoryFilter === "all") return true;
         return e.category === expenseCategoryFilter;
+    });
+
+    // Filter incomes list
+    const filteredIncomes = incomesList.filter((inc) => {
+        if (incomeCategoryFilter === "all") return true;
+        return inc.category === incomeCategoryFilter;
     });
 
     // Pie data for expenses
@@ -250,6 +303,25 @@ export default function RevenueReport({
             router.delete(`/admin/expenses/${expense.id}`, {
                 preserveScroll: true,
                 onSuccess: () => toast.success("Catatan pengeluaran berhasil dihapus."),
+            });
+        }
+    };
+
+    const handleCreateIncome = () => {
+        setEditingIncome(null);
+        setIncomeDialogOpen(true);
+    };
+
+    const handleEditIncome = (income: IncomeItem) => {
+        setEditingIncome(income);
+        setIncomeDialogOpen(true);
+    };
+
+    const handleDeleteIncome = (income: IncomeItem) => {
+        if (confirm(`Hapus catatan pendapatan "${income.title}" (${formatRupiah(income.amount)})?`)) {
+            router.delete(`/admin/incomes/${income.id}`, {
+                preserveScroll: true,
+                onSuccess: () => toast.success("Catatan pendapatan berhasil dihapus."),
             });
         }
     };
@@ -341,6 +413,16 @@ export default function RevenueReport({
                         >
                             <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
                             <span>{showAccountingGuide ? "Tutup Panduan" : "Panduan Konsep"}</span>
+                        </Button>
+
+                        <Button
+                            type="button"
+                            onClick={handleCreateIncome}
+                            size="sm"
+                            className="text-xs font-semibold gap-1.5 h-9 bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs"
+                        >
+                            <Plus className="h-4 w-4" />
+                            <span>Catat Pendapatan</span>
                         </Button>
 
                         <Button
@@ -599,6 +681,12 @@ export default function RevenueReport({
                         <TabsTrigger value="deposit_fines" className="text-xs font-medium py-1.5 px-3 rounded-lg data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs">
                             Deposit &amp; Denda
                         </TabsTrigger>
+                        <TabsTrigger value="incomes_ledger" className="text-xs font-medium py-1.5 px-3 rounded-lg data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs gap-1.5">
+                            <span>Buku Pendapatan Lain</span>
+                            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-medium border border-emerald-500/30">
+                                {incomesList.length}
+                            </span>
+                        </TabsTrigger>
                         <TabsTrigger value="expenses_ledger" className="text-xs font-medium py-1.5 px-3 rounded-lg data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs gap-1.5">
                             <span>Buku Beban (OPEX)</span>
                             <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-muted/80 text-muted-foreground font-medium border border-border/40">
@@ -665,6 +753,45 @@ export default function RevenueReport({
                                             <span className="block text-[10px] text-muted-foreground">Kas masuk langsung</span>
                                         </div>
                                     </div>
+
+                                    {summaryTotals.otherOperatingRevenue > 0 && (
+                                        <div className="flex items-center justify-between text-xs py-2 border-b border-border/40">
+                                            <div>
+                                                <span className="font-medium text-foreground block">Pendapatan Non-Sewa (Retail &amp; Jasa)</span>
+                                                <span className="text-[11px] text-muted-foreground">Penjualan gas kaleng, mantel, dan cuci alat</span>
+                                            </div>
+                                            <div className="text-right">
+                                                <span className="font-bold tabular-nums text-emerald-600 dark:text-emerald-400">{formatRupiah(summaryTotals.otherOperatingRevenue)}</span>
+                                                <span className="block text-[10px] text-muted-foreground">Kas masuk riil</span>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {summaryTotals.capitalInflow > 0 && (
+                                        <div className="flex items-center justify-between text-xs py-2 border-b border-border/40 bg-purple-500/5 px-2 rounded-lg">
+                                            <div>
+                                                <span className="font-medium text-purple-600 dark:text-purple-400 block">Suntikan Modal Kas Pemilik</span>
+                                                <span className="text-[11px] text-muted-foreground">Arus kas pendanaan masuk kasir/toko</span>
+                                            </div>
+                                            <div className="text-right">
+                                                <span className="font-bold tabular-nums text-purple-600 dark:text-purple-400">{formatRupiah(summaryTotals.capitalInflow)}</span>
+                                                <span className="block text-[10px] text-muted-foreground">Modal masuk</span>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {summaryTotals.nonOperatingRevenue > 0 && (
+                                        <div className="flex items-center justify-between text-xs py-2 border-b border-border/40">
+                                            <div>
+                                                <span className="font-medium text-foreground block">Pendapatan Bunga, Klaim &amp; Scrap</span>
+                                                <span className="text-[11px] text-muted-foreground">Bunga rekening toko &amp; ganti rugi pihak ketiga</span>
+                                            </div>
+                                            <div className="text-right">
+                                                <span className="font-bold tabular-nums text-foreground">{formatRupiah(summaryTotals.nonOperatingRevenue)}</span>
+                                                <span className="block text-[10px] text-muted-foreground">Kas masuk lainnya</span>
+                                            </div>
+                                        </div>
+                                    )}
 
                                     <div className="rounded-lg bg-muted/40 p-2.5 text-[11px] text-muted-foreground border border-border/60">
                                         <span>Total uang kas toko bertambah sebesar <strong className="text-foreground font-semibold">{formatRupiah(summaryTotals.totalCashIn)}</strong> pada periode ini.</span>
@@ -1007,6 +1134,36 @@ export default function RevenueReport({
                                                     {formatRupiah(summaryTotals.pureForfeitedInflow || 0)}
                                                 </span>
                                             </div>
+
+                                            {summaryTotals.otherOperatingRevenue > 0 && (
+                                                <div className="flex items-center justify-between py-1.5 text-muted-foreground pl-2 border-t border-border/30">
+                                                    <div>
+                                                        <span className="text-foreground font-medium block">4. Pendapatan Retail Outdoor &amp; Jasa Layanan</span>
+                                                        <span className="text-[11px] text-muted-foreground">Penjualan gas kaleng, mantel &amp; laundry tenda luar</span>
+                                                    </div>
+                                                    <span className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
+                                                        +{formatRupiah(summaryTotals.otherOperatingRevenue)}
+                                                    </span>
+                                                </div>
+                                            )}
+
+                                            {summaryTotals.nonOperatingRevenue > 0 && (
+                                                <div className="flex items-center justify-between py-1.5 text-muted-foreground pl-2 border-t border-border/30">
+                                                    <div>
+                                                        <span className="text-foreground font-medium block">5. Pendapatan Non-Operasional (Bunga, Klaim &amp; Scrap)</span>
+                                                        <span className="text-[11px] text-muted-foreground">Bunga rekening bank, ganti rugi cargo &amp; penjualan scrap</span>
+                                                    </div>
+                                                    <span className="font-semibold tabular-nums text-foreground">
+                                                        +{formatRupiah(summaryTotals.nonOperatingRevenue)}
+                                                    </span>
+                                                </div>
+                                            )}
+
+                                            {summaryTotals.capitalInflow > 0 && (
+                                                <div className="rounded-lg bg-purple-500/10 border border-purple-500/20 p-2 text-[11px] text-purple-700 dark:text-purple-300">
+                                                    <span>*Catatan: Suntikan modal pemilik sebesar <strong>{formatRupiah(summaryTotals.capitalInflow)}</strong> masuk ke likuiditas kas toko dan disajikan terpisah dari omset penjualan sewa.</span>
+                                                </div>
+                                            )}
 
                                             <div className="flex items-center justify-between pt-2.5 pb-1 border-t border-border/60 font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/5 px-2.5 py-1.5 rounded-lg">
                                                 <span>TOTAL PENDAPATAN KOTOR (GROSS REVENUE)</span>
@@ -1545,6 +1702,144 @@ export default function RevenueReport({
 
                     </TabsContent>
 
+                    {/* ========================================================================= */}
+                    {/* TAB 6: BUKU PENDAPATAN LAIN (INCOMES LEDGER) */}
+                    {/* ========================================================================= */}
+                    <TabsContent value="incomes_ledger" className="space-y-4 m-0">
+
+                        <Card className="border border-border/70 shadow-xs bg-card rounded-xl">
+                            <CardHeader className="pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/60">
+                                <div>
+                                    <CardTitle className="text-sm font-bold text-foreground">
+                                        Buku Pencatatan Pendapatan di Luar Sewa
+                                    </CardTitle>
+                                    <CardDescription className="text-xs">
+                                        Daftar seluruh transaksi pemasukan retail, jasa layanan luar, modal tambahan, dan pendapatan lainnya.
+                                    </CardDescription>
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                    <select
+                                        value={incomeCategoryFilter}
+                                        onChange={(e) => setIncomeCategoryFilter(e.target.value)}
+                                        className="h-8 rounded-lg border border-border bg-background px-2.5 text-xs font-medium text-foreground"
+                                    >
+                                        <option value="all">Semua Kategori</option>
+                                        <option value="penjualan_barang">Penjualan Retail</option>
+                                        <option value="jasa_layanan">Jasa Layanan</option>
+                                        <option value="modal_tambahan">Modal Tambahan</option>
+                                        <option value="pendapatan_bunga">Pendapatan Bunga</option>
+                                        <option value="klaim_kompensasi">Klaim Kompensasi</option>
+                                        <option value="lain_lain">Lain-lain</option>
+                                    </select>
+
+                                    <Button
+                                        type="button"
+                                        size="sm"
+                                        onClick={handleCreateIncome}
+                                        className="h-8 text-xs font-semibold gap-1 bg-emerald-600 hover:bg-emerald-700 text-white"
+                                    >
+                                        <Plus className="h-3.5 w-3.5" />
+                                        <span>Tambah</span>
+                                    </Button>
+                                </div>
+                            </CardHeader>
+                            <CardContent className="p-0">
+                                {filteredIncomes.length === 0 ? (
+                                    <div className="p-12 text-center text-xs text-muted-foreground">
+                                        Tidak ada catatan pendapatan pada periode atau kategori ini.
+                                    </div>
+                                ) : (
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-xs whitespace-nowrap">
+                                            <thead>
+                                                <tr className="border-b border-border/70 bg-muted/40">
+                                                    <th className="px-4 py-3 text-left font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">No. Pendapatan</th>
+                                                    <th className="px-3 py-3 text-left font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">Tanggal</th>
+                                                    <th className="px-3 py-3 text-left font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">Kategori</th>
+                                                    <th className="px-3 py-3 text-left font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">Keterangan</th>
+                                                    <th className="px-3 py-3 text-right font-semibold text-emerald-600 dark:text-emerald-400 uppercase text-[10px] tracking-wider">Nominal (Rp)</th>
+                                                    <th className="px-3 py-3 text-left font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">Metode</th>
+                                                    <th className="px-3 py-3 text-left font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">Status</th>
+                                                    <th className="px-3 py-3 text-left font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">Dicatat Oleh</th>
+                                                    <th className="px-4 py-3 text-center font-semibold text-muted-foreground uppercase text-[10px] tracking-wider">Aksi</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-border/60">
+                                                {filteredIncomes.map((inc) => (
+                                                    <tr key={inc.id} className="hover:bg-muted/30 transition-colors">
+                                                        <td className="px-4 py-2.5 font-mono text-[11px] font-medium text-foreground">
+                                                            {inc.income_number}
+                                                        </td>
+                                                        <td className="px-3 py-2.5 font-mono text-muted-foreground">
+                                                            {inc.income_date}
+                                                        </td>
+                                                        <td className="px-3 py-2.5">
+                                                            <Badge variant="outline" className="text-[10px] font-medium">
+                                                                {INCOME_LABELS[inc.category] || inc.category}
+                                                            </Badge>
+                                                        </td>
+                                                        <td className="px-3 py-2.5 font-medium text-foreground max-w-xs truncate">
+                                                            {inc.title}
+                                                            {inc.notes && (
+                                                                <span className="block text-[10px] text-muted-foreground truncate">{inc.notes}</span>
+                                                            )}
+                                                        </td>
+                                                        <td className="px-3 py-2.5 text-right font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
+                                                            +{formatRupiah(inc.amount)}
+                                                        </td>
+                                                        <td className="px-3 py-2.5 text-muted-foreground">
+                                                            {inc.payment_method === "cash" ? "Tunai Kasir" : "Transfer Bank"}
+                                                        </td>
+                                                        <td className="px-3 py-2.5">
+                                                            <Badge
+                                                                variant="outline"
+                                                                className={`text-[10px] font-semibold ${inc.payment_status === "received"
+                                                                    ? "border-emerald-500/30 text-emerald-600 dark:text-emerald-400 bg-emerald-500/10"
+                                                                    : "border-amber-500/30 text-amber-600 dark:text-amber-400 bg-amber-500/10"
+                                                                    }`}
+                                                            >
+                                                                {inc.payment_status === "received" ? "Diterima (Kas)" : "Pending (Piutang)"}
+                                                            </Badge>
+                                                        </td>
+                                                        <td className="px-3 py-2.5 text-muted-foreground">
+                                                            {inc.user_name || "Admin"}
+                                                        </td>
+                                                        <td className="px-4 py-2.5 text-center">
+                                                            <div className="flex items-center justify-center gap-1">
+                                                                <Button
+                                                                    type="button"
+                                                                    variant="ghost"
+                                                                    size="icon"
+                                                                    onClick={() => handleEditIncome(inc)}
+                                                                    className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                                                                    title="Edit Pendapatan"
+                                                                >
+                                                                    <Edit className="h-3.5 w-3.5" />
+                                                                </Button>
+                                                                <Button
+                                                                    type="button"
+                                                                    variant="ghost"
+                                                                    size="icon"
+                                                                    onClick={() => handleDeleteIncome(inc)}
+                                                                    className="h-7 w-7 text-rose-600 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/30"
+                                                                    title="Hapus Pendapatan"
+                                                                >
+                                                                    <Trash2 className="h-3.5 w-3.5" />
+                                                                </Button>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </CardContent>
+                        </Card>
+
+                    </TabsContent>
+
                 </Tabs>
 
                 {/* Expense Modal Dialog */}
@@ -1552,6 +1847,13 @@ export default function RevenueReport({
                     open={dialogOpen}
                     onOpenChange={setDialogOpen}
                     expense={editingExpense}
+                />
+
+                {/* Income Modal Dialog */}
+                <IncomeFormDialog
+                    open={incomeDialogOpen}
+                    onOpenChange={setIncomeDialogOpen}
+                    income={editingIncome}
                 />
 
             </div>

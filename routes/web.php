@@ -7,6 +7,7 @@ use App\Http\Controllers\Admin\EquipmentController as AdminEquipmentController;
 use App\Http\Controllers\Admin\EquipmentUnitController as AdminEquipmentUnitController;
 use App\Http\Controllers\Admin\ExpenseController as AdminExpenseController;
 use App\Http\Controllers\Admin\FineController as AdminFineController;
+use App\Http\Controllers\Admin\IncomeController as AdminIncomeController;
 use App\Http\Controllers\Admin\InventoryLogController as AdminInventoryLogController;
 use App\Http\Controllers\Admin\RentalOrderController as AdminRentalOrderController;
 use App\Http\Controllers\Admin\ReportController as AdminReportController;
@@ -82,6 +83,9 @@ Route::middleware(['auth', 'verified', 'staff'])->prefix('admin')->name('admin.'
         Route::post('/expenses', [AdminExpenseController::class, 'store'])->name('expenses.store');
         Route::put('/expenses/{expense}', [AdminExpenseController::class, 'update'])->name('expenses.update');
         Route::delete('/expenses/{expense}', [AdminExpenseController::class, 'destroy'])->name('expenses.destroy');
+        Route::post('/incomes', [AdminIncomeController::class, 'store'])->name('incomes.store');
+        Route::put('/incomes/{income}', [AdminIncomeController::class, 'update'])->name('incomes.update');
+        Route::delete('/incomes/{income}', [AdminIncomeController::class, 'destroy'])->name('incomes.destroy');
     });
 
     // 5. Administrator Exclusive Routes (Kelola Pengguna & Moderasi Ulasan)

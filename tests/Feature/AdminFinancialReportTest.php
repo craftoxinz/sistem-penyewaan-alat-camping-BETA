@@ -1,14 +1,17 @@
 <?php
 
 use App\Models\Expense;
+use App\Models\Income;
 use App\Models\User;
 use Database\Seeders\CampingRentalSeeder;
 use Database\Seeders\ExpenseSeeder;
+use Database\Seeders\IncomeSeeder;
 use Inertia\Testing\AssertableInertia as Assert;
 
 beforeEach(function () {
     $this->seed(CampingRentalSeeder::class);
     $this->seed(ExpenseSeeder::class);
+    $this->seed(IncomeSeeder::class);
 });
 
 test('admin and kasir can view comprehensive financial report with profit-loss and cash logs', function () {
@@ -25,6 +28,7 @@ test('admin and kasir can view comprehensive financial report with profit-loss a
             ->has('monthlyRevenue')
             ->has('cashLogs')
             ->has('expensesList')
+            ->has('incomesList')
             ->has('summaryTotals', fn (Assert $summary) => $summary
                 ->has('totalCashIn')
                 ->has('totalCashOut')
@@ -35,6 +39,11 @@ test('admin and kasir can view comprehensive financial report with profit-loss a
                 ->has('totalPaidExpenses')
                 ->has('totalUnpaidExpenses')
                 ->has('expenseCategories')
+                ->has('totalIncomes')
+                ->has('totalReceivedIncomes')
+                ->has('totalPendingIncomes')
+                ->has('incomeCategories')
+                ->has('incomesCount')
                 ->has('totalReceivables')
                 ->has('totalPayables')
                 ->etc()
@@ -108,4 +117,62 @@ test('staff can delete an operating expense', function () {
     $response->assertRedirect();
 
     $this->assertDatabaseMissing('expenses', ['id' => $expenseId]);
+});
+
+test('staff can record a new income', function () {
+    $admin = User::where('role', 'admin')->first();
+
+    $response = $this->actingAs($admin)->post(route('admin.incomes.store'), [
+        'category' => 'penjualan_barang',
+        'title' => 'Penjualan 5 Gas Portabel & 2 Jas Hujan',
+        'amount' => 115000,
+        'income_date' => now()->toDateString(),
+        'payment_method' => 'cash',
+        'payment_status' => 'received',
+        'notes' => 'Penjualan langsung di toko',
+    ]);
+
+    $response->assertSessionHasNoErrors();
+    $response->assertRedirect();
+
+    $this->assertDatabaseHas('incomes', [
+        'title' => 'Penjualan 5 Gas Portabel & 2 Jas Hujan',
+        'amount' => 115000.00,
+        'category' => 'penjualan_barang',
+        'payment_status' => 'received',
+    ]);
+});
+
+test('staff can update an existing income', function () {
+    $admin = User::where('role', 'admin')->first();
+    $income = Income::first();
+
+    $response = $this->actingAs($admin)->put(route('admin.incomes.update', $income->id), [
+        'category' => 'jasa_layanan',
+        'title' => 'Jasa Cuci Tenda Konsumen (Update)',
+        'amount' => 95000,
+        'income_date' => $income->income_date->toDateString(),
+        'payment_method' => 'transfer',
+        'payment_status' => 'received',
+        'notes' => 'Catatan revisi',
+    ]);
+
+    $response->assertSessionHasNoErrors();
+    $response->assertRedirect();
+
+    $income->refresh();
+    expect($income->title)->toBe('Jasa Cuci Tenda Konsumen (Update)');
+    expect((float) $income->amount)->toEqual(95000.0);
+    expect($income->category)->toBe('jasa_layanan');
+});
+
+test('staff can delete an income', function () {
+    $admin = User::where('role', 'admin')->first();
+    $income = Income::first();
+    $incomeId = $income->id;
+
+    $response = $this->actingAs($admin)->delete(route('admin.incomes.destroy', $incomeId));
+    $response->assertRedirect();
+
+    $this->assertDatabaseMissing('incomes', ['id' => $incomeId]);
 });

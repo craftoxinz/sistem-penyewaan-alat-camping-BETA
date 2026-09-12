@@ -7,6 +7,7 @@ use App\Models\Category;
 use App\Models\Equipment;
 use App\Models\EquipmentUnit;
 use App\Models\Expense;
+use App\Models\Income;
 use App\Models\Rental;
 use App\Models\UnitLog;
 use App\Models\User;
@@ -82,6 +83,49 @@ class ReportController extends Controller
             ];
         })->values();
 
+        // === 1.1 PENDAPATAN LAIN (OTHER INCOMES) ===
+        $allIncomes = Income::with('user')
+            ->whereBetween('income_date', [$startDate, $endDate])
+            ->orderByDesc('income_date')
+            ->get();
+
+        $receivedIncomes = $allIncomes->where('payment_status', 'received');
+        $pendingIncomes = $allIncomes->where('payment_status', 'pending');
+
+        $totalIncomes = (float) $allIncomes->sum('amount');
+        $totalReceivedIncomes = (float) $receivedIncomes->sum('amount');
+        $totalPendingIncomes = (float) $pendingIncomes->sum('amount');
+
+        $incomeCategories = [
+            'penjualan_barang' => (float) $allIncomes->where('category', 'penjualan_barang')->sum('amount'),
+            'jasa_layanan' => (float) $allIncomes->where('category', 'jasa_layanan')->sum('amount'),
+            'modal_tambahan' => (float) $allIncomes->where('category', 'modal_tambahan')->sum('amount'),
+            'pendapatan_bunga' => (float) $allIncomes->where('category', 'pendapatan_bunga')->sum('amount'),
+            'klaim_kompensasi' => (float) $allIncomes->where('category', 'klaim_kompensasi')->sum('amount'),
+            'lain_lain' => (float) $allIncomes->where('category', 'lain_lain')->sum('amount'),
+        ];
+
+        // Breakdown omset operasional non-sewa vs modal tambahan vs non-operasional
+        $otherOperatingRevenue = (float) $receivedIncomes->whereIn('category', ['penjualan_barang', 'jasa_layanan'])->sum('amount');
+        $nonOperatingRevenue = (float) $receivedIncomes->whereIn('category', ['pendapatan_bunga', 'klaim_kompensasi', 'lain_lain'])->sum('amount');
+        $capitalInflow = (float) $receivedIncomes->where('category', 'modal_tambahan')->sum('amount');
+
+        $incomesList = $allIncomes->map(function ($inc) {
+            return [
+                'id' => $inc->id,
+                'income_number' => $inc->income_number,
+                'category' => $inc->category,
+                'title' => $inc->title,
+                'amount' => (float) $inc->amount,
+                'income_date' => $inc->income_date?->format('Y-m-d'),
+                'payment_method' => $inc->payment_method,
+                'payment_status' => $inc->payment_status,
+                'notes' => $inc->notes,
+                'user_name' => $inc->user?->name ?? 'Kasir / Toko',
+                'created_at' => $inc->created_at?->toIso8601String(),
+            ];
+        })->values();
+
         // === 2. KAS MASUK (INFLOW) ===
         // DP masuk: berdasarkan tanggal verifikasi kasir
         $dpInflowRentals = Rental::with('user')
@@ -131,11 +175,11 @@ class ReportController extends Controller
             fn ($r) => max(0, (float) $r->total_deposit - (float) $r->deposit_refund_amount)
         );
 
-        // Kas Masuk Riil (Uang Tunai / Transfer Masuk)
-        $totalCashIn = $totalDpInflow + $totalCodInflow + $totalFineInflow;
+        // Kas Masuk Riil (Uang Tunai / Transfer Masuk) = DP + COD + Denda Tunai + Pendapatan Lain Diterima
+        $totalCashIn = $totalDpInflow + $totalCodInflow + $totalFineInflow + $totalReceivedIncomes;
 
-        // Total Inflow gabungan (termasuk klaim deposit for backward compatibility)
-        $totalInflow = $totalDpInflow + $totalCodInflow + $totalFineInflow + $totalForfeitedInflow;
+        // Total Inflow gabungan (termasuk klaim deposit & pendapatan lain)
+        $totalInflow = $totalDpInflow + $totalCodInflow + $totalFineInflow + $totalForfeitedInflow + $totalReceivedIncomes;
 
         // Kas Keluar Riil = Refund Jaminan + Beban Operasional Terbayar
         $totalRefundOutflow = (float) $refundRentals->sum('deposit_refund_amount');
@@ -144,8 +188,11 @@ class ReportController extends Controller
         // Arus Kas Bersih (Net Cash Flow)
         $netCashFlow = $totalCashIn - $totalCashOut;
 
-        // Pendapatan Kotor (Gross Revenue) = Sewa (DP+COD) + Denda + Deposit Sitaan
-        $grossRevenue = $totalInflow;
+        // Pendapatan Pokok Sewa (Rental Gross Revenue)
+        $rentalGrossRevenue = $totalDpInflow + $totalCodInflow + $totalFineInflow + $totalForfeitedInflow;
+
+        // Pendapatan Kotor Usaha (Gross Revenue) = Sewa + Pendapatan Operasional Lainnya + Pendapatan Non-Operasional Lainnya
+        $grossRevenue = $rentalGrossRevenue + $otherOperatingRevenue + $nonOperatingRevenue;
 
         // Laba / (Rugi) Bersih Usaha (Net Profit) = Gross Revenue - Total Beban Usaha
         $netProfit = $grossRevenue - $totalExpenses;
@@ -191,7 +238,7 @@ class ReportController extends Controller
         );
         $depositHeldAmount = (float) $depositHeldRentals->sum('total_deposit');
 
-        $totalReceivables = $codOutstandingAmount + $fineOutstandingAmount;
+        $totalReceivables = $codOutstandingAmount + $fineOutstandingAmount + $totalPendingIncomes;
         $totalPayables = $depositHeldAmount + $totalUnpaidExpenses;
 
         // === 7. LOG MUTASI ARUS KAS KRONOLOGIS (CASH FLOW LOGS) ===
@@ -294,6 +341,32 @@ class ReportController extends Controller
             ]);
         }
 
+        foreach ($receivedIncomes as $inc) {
+            $catLabel = match ($inc->category) {
+                'penjualan_barang' => 'Penjualan Retail',
+                'jasa_layanan' => 'Jasa Layanan',
+                'modal_tambahan' => 'Modal Tambahan',
+                'pendapatan_bunga' => 'Pendapatan Bunga',
+                'klaim_kompensasi' => 'Klaim Kompensasi',
+                default => 'Pendapatan Lain',
+            };
+
+            $cashLogs->push([
+                'id' => 'inc-'.$inc->id,
+                'datetime' => Carbon::parse($inc->income_date)->startOfDay()->toIso8601String(),
+                'date' => $inc->income_date?->format('Y-m-d'),
+                'type' => 'cash_in',
+                'category' => 'income_'.$inc->category,
+                'category_label' => 'Masuk: '.$catLabel,
+                'reference_code' => $inc->income_number,
+                'invoice_number' => $inc->income_number,
+                'description' => $inc->title,
+                'party_name' => $inc->user?->name ?? 'Kasir / Toko',
+                'amount' => (float) $inc->amount,
+                'payment_method' => $inc->payment_method === 'cash' ? 'Tunai Kasir' : 'Transfer Bank',
+            ]);
+        }
+
         $cashLogs = $cashLogs->sortByDesc('datetime')->values();
 
         // === 8. RINCIAN HARIAN ===
@@ -328,27 +401,37 @@ class ReportController extends Controller
                 $dailyMap[$date]['expense_outflow'] = ($dailyMap[$date]['expense_outflow'] ?? 0.0) + (float) $e->amount;
             }
         }
+        foreach ($receivedIncomes as $inc) {
+            $date = $inc->income_date?->format('Y-m-d');
+            if ($date) {
+                $dailyMap[$date]['other_income_inflow'] = ($dailyMap[$date]['other_income_inflow'] ?? 0.0) + (float) $inc->amount;
+                $dailyMap[$date]['other_income_count'] = ($dailyMap[$date]['other_income_count'] ?? 0) + 1;
+            }
+        }
 
         $dailyRevenue = collect($dailyMap)->map(function ($data, $date) {
             $dpIn = $data['dp_inflow'] ?? 0.0;
             $codIn = $data['cod_inflow'] ?? 0.0;
             $fineIn = $data['fine_inflow'] ?? 0.0;
             $forfeitedIn = $data['forfeited_inflow'] ?? 0.0;
+            $otherIn = $data['other_income_inflow'] ?? 0.0;
             $refundOut = $data['refund_outflow'] ?? 0.0;
             $expenseOut = $data['expense_outflow'] ?? 0.0;
 
-            $totalIn = $dpIn + $codIn + $fineIn + $forfeitedIn;
-            $cashIn = $dpIn + $codIn + $fineIn;
+            $totalIn = $dpIn + $codIn + $fineIn + $forfeitedIn + $otherIn;
+            $cashIn = $dpIn + $codIn + $fineIn + $otherIn;
             $cashOut = $refundOut + $expenseOut;
 
             return [
                 'date' => $date,
                 'dp_count' => $data['dp_count'] ?? 0,
                 'cod_count' => $data['cod_count'] ?? 0,
+                'other_income_count' => $data['other_income_count'] ?? 0,
                 'dp_inflow' => $dpIn,
                 'cod_inflow' => $codIn,
                 'fine_inflow' => $fineIn,
                 'forfeited_inflow' => $forfeitedIn,
+                'other_income_inflow' => $otherIn,
                 'total_inflow' => $totalIn,
                 'cash_in' => $cashIn,
                 'refund_outflow' => $refundOut,
@@ -379,6 +462,9 @@ class ReportController extends Controller
         $monthlyExpenses = Expense::whereYear('expense_date', $currentYear)
             ->where('payment_status', 'paid')
             ->get();
+        $monthlyIncomes = Income::whereYear('income_date', $currentYear)
+            ->where('payment_status', 'received')
+            ->get();
 
         $monthlyMap = [];
         foreach ($monthlyDpRentals as $r) {
@@ -406,6 +492,10 @@ class ReportController extends Controller
             $m = (int) $e->expense_date->format('n');
             $monthlyMap[$m]['expense_outflow'] = ($monthlyMap[$m]['expense_outflow'] ?? 0.0) + (float) $e->amount;
         }
+        foreach ($monthlyIncomes as $inc) {
+            $m = (int) $inc->income_date->format('n');
+            $monthlyMap[$m]['other_income_inflow'] = ($monthlyMap[$m]['other_income_inflow'] ?? 0.0) + (float) $inc->amount;
+        }
 
         $monthlyRevenue = collect(range(1, 12))->map(function ($monthNum) use ($monthlyMap, $currentYear) {
             $data = $monthlyMap[$monthNum] ?? [];
@@ -413,11 +503,12 @@ class ReportController extends Controller
             $codIn = $data['cod_inflow'] ?? 0.0;
             $fineIn = $data['fine_inflow'] ?? 0.0;
             $forfeitedIn = $data['forfeited_inflow'] ?? 0.0;
+            $otherIn = $data['other_income_inflow'] ?? 0.0;
             $refundOut = $data['refund_outflow'] ?? 0.0;
             $expenseOut = $data['expense_outflow'] ?? 0.0;
 
-            $totalIn = $dpIn + $codIn + $fineIn + $forfeitedIn;
-            $cashIn = $dpIn + $codIn + $fineIn;
+            $totalIn = $dpIn + $codIn + $fineIn + $forfeitedIn + $otherIn;
+            $cashIn = $dpIn + $codIn + $fineIn + $otherIn;
             $cashOut = $refundOut + $expenseOut;
 
             return [
@@ -427,6 +518,7 @@ class ReportController extends Controller
                 'cod_inflow' => $codIn,
                 'fine_inflow' => $fineIn,
                 'forfeited_inflow' => $forfeitedIn,
+                'other_income_inflow' => $otherIn,
                 'total_inflow' => $totalIn,
                 'cash_in' => $cashIn,
                 'refund_outflow' => $refundOut,
@@ -480,11 +572,22 @@ class ReportController extends Controller
             'pureForfeitedInflow' => $pureForfeitedInflow,
             'totalFineReceived' => $totalFineReceived,
 
-            // Metadata
+            // Metadata & Counts
             'dpTransactionCount' => $dpInflowRentals->count(),
             'codTransactionCount' => $codInflowRentals->count(),
             'cashLogsCount' => $cashLogs->count(),
             'expensesCount' => $allExpenses->count(),
+            'incomesCount' => $allIncomes->count(),
+
+            // Pendapatan Lain (Incomes Breakdown)
+            'totalIncomes' => $totalIncomes,
+            'totalReceivedIncomes' => $totalReceivedIncomes,
+            'totalPendingIncomes' => $totalPendingIncomes,
+            'otherOperatingRevenue' => $otherOperatingRevenue,
+            'nonOperatingRevenue' => $nonOperatingRevenue,
+            'capitalInflow' => $capitalInflow,
+            'incomeCategories' => $incomeCategories,
+            'rentalGrossRevenue' => $rentalGrossRevenue,
         ];
 
         return Inertia::render('admin/reports/revenue', [
@@ -493,6 +596,7 @@ class ReportController extends Controller
             'summaryTotals' => $summaryTotals,
             'cashLogs' => $cashLogs,
             'expensesList' => $expensesList,
+            'incomesList' => $incomesList,
             'filters' => [
                 'start_date' => $startDate,
                 'end_date' => $endDate,
